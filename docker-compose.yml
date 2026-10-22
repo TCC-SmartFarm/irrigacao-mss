@@ -1,0 +1,15 @@
+services:
+  irrigacao-mss:
+    build: .
+    container_name: irrigacao-mss
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8456:8456"
+    networks:
+      - smartfarm-network
+
+networks:
+  smartfarm-network:
+    external: true

@@ -15,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
+
+	"github.com/supabase-community/supabase-go"
 )
 
 const weatherURL = "https://api.open-meteo.com/v1/forecast"
@@ -71,7 +74,8 @@ func wholeNumber(key string, fallback int) int {
 
 func config() (Config, error) {
 	c := Config{
-		FixSensorTimestamp: strings.EqualFold(
+		FixSensorTimestamp: 
+		strings.EqualFold(
 			env("TEMP_FIX_SENSOR_TIMESTAMP", "false"),
 			"true",
 		),
@@ -80,8 +84,8 @@ func config() (Config, error) {
 		SensorToken:     os.Getenv("SENSOR_API_TOKEN"),
 		SupabaseURL:     strings.TrimRight(os.Getenv("SUPABASE_URL"), "/"),
 		SupabaseKey:     os.Getenv("SUPABASE_KEY"),
-		SupabaseTable:   env("SUPABASE_TABLE", "profiles"),
-		UserColumn:      env("SUPABASE_USER_COLUMN", "id"),
+		SupabaseTable:   env("SUPABASE_TABLE", "users"),
+		UserColumn:      env("SUPABASE_USER_COLUMN", "userId"),
 		DevicesColumn:   env("SUPABASE_DEVICES_COLUMN", "devices"),
 		Dry:             number("SOIL_DRY_THRESHOLD", 30),
 		Wet:             number("SOIL_WET_THRESHOLD", 70),
@@ -314,53 +318,93 @@ func latestSensor(ctx context.Context, c Config, client *http.Client, user, devE
 	return valid[latestIndex], history, filteredSoil, prediction, nil
 }
 
-func sensorLocation(ctx context.Context, c Config, client *http.Client, user, devEUI string) (float64, float64, error) {
-	base, err := url.Parse(c.SupabaseURL + "/rest/v1/" + url.PathEscape(c.SupabaseTable))
-	if err != nil {
-		return 0, 0, err
-	}
-	q := base.Query()
-	q.Set("select", c.DevicesColumn)
-	q.Set(c.UserColumn, "eq."+user)
-	q.Set("limit", "1")
-	base.RawQuery = q.Encode()
-	headers := map[string]string{
-		"apikey": c.SupabaseKey,
-		"Accept": "application/json",
-	}
-	var rows []map[string]json.RawMessage
-	if err := get(ctx, client, base.String(), headers, &rows); err != nil {
-		return 0, 0, fmt.Errorf("Supabase: %w", err)
-	}
-	if len(rows) == 0 {
-		return 0, 0, errors.New("nenhum registro encontrado no Supabase para esse usuário")
-	}
-	devices := rows[0][c.DevicesColumn]
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(devices, &object); err == nil {
-		// A coluna devices pode ser um objeto JSON indexado por "1", "2" etc.
-		if direct, ok := object[devEUI]; ok {
-			var d DeviceLocation
-			if json.Unmarshal(direct, &d) == nil {
-				return checkedCoords(d)
-			}
-		}
-		for _, raw := range object {
-			var d DeviceLocation
-			if json.Unmarshal(raw, &d) == nil && strings.EqualFold(d.DevEUI, devEUI) {
-				return checkedCoords(d)
-			}
-		}
-	}
-	var array []DeviceLocation
-	if err := json.Unmarshal(devices, &array); err == nil {
-		for _, d := range array {
-			if strings.EqualFold(d.DevEUI, devEUI) {
-				return checkedCoords(d)
-			}
-		}
-	}
-	return 0, 0, fmt.Errorf("devEUI %s não foi encontrado na coluna %s do Supabase", devEUI, c.DevicesColumn)
+func sensorLocation(
+    supabaseClient *supabase.Client,
+    c Config,
+    user string,
+    devEUI string,
+) (float64, float64, error) {
+    user = strings.TrimSpace(user)
+    devEUI = strings.TrimSpace(devEUI)
+
+    if user == "" || devEUI == "" {
+        return 0, 0, errors.New("userId e devEUI são obrigatórios")
+    }
+
+    var rows []map[string]json.RawMessage
+
+    _, err := supabaseClient.
+		From(c.SupabaseTable).
+		Select(c.DevicesColumn, "exact", false).
+		Filter(c.UserColumn, "eq", user).
+		ExecuteTo(&rows)
+
+    if err != nil {
+        return 0, 0, fmt.Errorf(
+            "Supabase: falha na consulta da tabela %s usando %s=%q: %w",
+            c.SupabaseTable,
+            c.UserColumn,
+            user,
+            err,
+        )
+    }
+
+    if len(rows) == 0 {
+        return 0, 0, fmt.Errorf(
+            "Supabase: nenhum registro visível na tabela %s para %s=%q; confira projeto, chave, permissões e RLS",
+            c.SupabaseTable,
+            c.UserColumn,
+            user,
+        )
+    }
+
+    devices, exists := rows[0][c.DevicesColumn]
+    if !exists || len(devices) == 0 || string(devices) == "null" {
+        return 0, 0, fmt.Errorf(
+            "Supabase: o usuário foi encontrado, mas a coluna %s está ausente ou nula",
+            c.DevicesColumn,
+        )
+    }
+
+    // Estrutura habitual: {"1": {"devEUI": "...", "lat": ..., "lon": ...}}
+    var object map[string]json.RawMessage
+    if err := json.Unmarshal(devices, &object); err == nil {
+        // Também aceita dispositivos indexados diretamente pelo devEUI.
+        if direct, ok := object[devEUI]; ok {
+            var d DeviceLocation
+            if err := json.Unmarshal(direct, &d); err == nil {
+                return checkedCoords(d)
+            }
+        }
+
+        for _, raw := range object {
+            var d DeviceLocation
+            if err := json.Unmarshal(raw, &d); err != nil {
+                continue
+            }
+
+            if strings.EqualFold(strings.TrimSpace(d.DevEUI), devEUI) {
+                return checkedCoords(d)
+            }
+        }
+    }
+
+    // Também aceita uma lista JSON de dispositivos.
+    var devicesArray []DeviceLocation
+    if err := json.Unmarshal(devices, &devicesArray); err == nil {
+        for _, d := range devicesArray {
+            if strings.EqualFold(strings.TrimSpace(d.DevEUI), devEUI) {
+                return checkedCoords(d)
+            }
+        }
+    }
+
+    return 0, 0, fmt.Errorf(
+        "Supabase: dispositivo %s não encontrado na coluna %s do usuário %s",
+        devEUI,
+        c.DevicesColumn,
+        user,
+    )
 }
 
 func checkedCoords(d DeviceLocation) (float64, float64, error) {
@@ -783,7 +827,7 @@ type Response struct {
 	Note                   string                 `json:"note"`
 }
 
-func handler(c Config, client *http.Client) http.HandlerFunc {
+func handler(c Config, client *http.Client, supabaseClient *supabase.Client,) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, devEUI := r.URL.Query().Get("userId"), r.URL.Query().Get("devEUI")
 		if user == "" || devEUI == "" {
@@ -807,7 +851,7 @@ func handler(c Config, client *http.Client) http.HandlerFunc {
 			respond(w, 502, map[string]string{"error": err.Error()})
 			return
 		}
-		lat, lon, err := sensorLocation(ctx, c, client, user, devEUI)
+		lat, lon, err := sensorLocation(supabaseClient, c, user, devEUI)
 		if err != nil {
 			respond(w, 502, map[string]string{"error": err.Error()})
 			return
@@ -859,15 +903,40 @@ func respond(w http.ResponseWriter, status int, value any) {
 }
 
 func main() {
-	c, err := config()
-	if err != nil {
-		log.Fatal(err)
-	}
-	client := &http.Client{Timeout: c.Timeout}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, map[string]string{"status": "ok"}) })
-	mux.Handle("GET /api/v1/irrigation", handler(c, client))
-	server := &http.Server{Addr: ":" + c.Port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	log.Printf("irrigacao-mss ouvindo na porta %s", c.Port)
-	log.Fatal(server.ListenAndServe())
+    c, err := config()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    supabaseClient, err := supabase.NewClient(
+        c.SupabaseURL,
+        c.SupabaseKey,
+        nil,
+    )
+    if err != nil {
+        log.Fatalf("Falha ao inicializar cliente Supabase: %v", err)
+    }
+
+    log.Println("Cliente Supabase inicializado com sucesso")
+
+    client := &http.Client{Timeout: c.Timeout}
+
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+        respond(w, 200, map[string]string{"status": "ok"})
+    })
+
+    mux.Handle(
+        "GET /api/v1/irrigation",
+        handler(c, client, supabaseClient),
+    )
+
+    server := &http.Server{
+        Addr:              ":" + c.Port,
+        Handler:           mux,
+        ReadHeaderTimeout: 5 * time.Second,
+    }
+
+    log.Printf("irrigacao-mss ouvindo na porta %s", c.Port)
+    log.Fatal(server.ListenAndServe())
 }
