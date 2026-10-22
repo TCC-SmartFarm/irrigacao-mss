@@ -1,194 +1,122 @@
 # Irrigacao-MSS
 
-Microsserviço de recomendação de irrigação desenvolvido em Go. O serviço integra dados de sensores de umidade do solo, informações geográficas armazenadas no Supabase e previsões meteorológicas da Open-Meteo para avaliar as condições do solo e identificar um momento potencialmente mais adequado para a irrigação.
+Microsserviço de recomendação de irrigação desenvolvido em Go. O serviço integra leituras de sensores, coordenadas de dispositivos armazenadas no Supabase e previsão meteorológica da Open-Meteo. Toda a lógica de filtragem, projeção, classificação, diagnósticos e recomendação é calculada no backend; os clientes (por exemplo, o aplicativo Expo) devem apenas consumir e apresentar os campos retornados pela API.
 
-O sistema combina processamento de séries temporais, filtragem de ruído por meio do filtro de Kalman e análise da previsão de precipitação em uma janela de seis dias. Seu objetivo é auxiliar a tomada de decisão sobre a irrigação, reduzindo a influência de oscilações nas medições e considerando a possibilidade de chuva nos dias seguintes.
+> **Importante:** o microsserviço oferece apoio à decisão, não comanda bombas, válvulas ou outros atuadores. A escala do sensor e os parâmetros devem ser calibrados com dados de campo antes de usar as recomendações operacionalmente.
 
-> **Importante:** este microsserviço gera recomendações. Ele não aciona diretamente equipamentos de irrigação, e suas recomendações devem ser validadas considerando a cultura, o solo e as condições reais do local.
+## 1. Responsabilidades do MSS
 
----
+O microsserviço é a fonte de verdade para:
 
-## 1. Visão geral da arquitetura
+- validação, filtragem e ordenação temporal das leituras;
+- estimativa de nível e tendência da umidade e projeção futura;
+- classificação da tendência e avaliação da incerteza da projeção;
+- detecção de sequências persistentes próximas aos limites inferior e superior do sensor;
+- resumo dos dados meteorológicos;
+- classificação do solo e recomendação de irrigação;
+- mensagens explicativas dos diagnósticos e da recomendação.
 
-O processamento envolve três fontes principais de dados:
+O frontend não deve recalcular esses critérios. Ele pode formatar datas e unidades, desenhar gráficos, traduzir códigos para rótulos visuais e exibir os campos já calculados pelo MSS.
 
-1. **API de sensores:** fornece as leituras de umidade do solo, umidade do ar, temperatura do ar, timestamp e indicador de validade.
-2. **Supabase:** armazena as coordenadas geográficas associadas ao dispositivo.
-3. **Open-Meteo:** fornece a previsão diária de precipitação e, quando disponível, a evapotranspiração de referência (ET₀).
-
-A partir dessas informações, o microsserviço processa as leituras, consulta a previsão meteorológica e produz uma resposta estruturada em JSON.
-
-### Fluxo de execução
+## 2. Arquitetura e fluxo
 
 ```text
-Requisição HTTP
-      |
-      v
-Identificação do usuário e sensor
-      |
-      v
-Consulta à API de sensores
-      |
-      v
-Validação das leituras
-      |
-      v
-Ordenação temporal das medições
-      |
-      v
-Filtro de Kalman
-      |
-      v
-Consulta das coordenadas no Supabase
-      |
-      v
-Previsão meteorológica da Open-Meteo
-      |
-      v
-Classificação da umidade do solo
-      |
-      v
-Análise dos seis dias de previsão
-      |
-      v
-Resposta JSON com recomendação
+GET /api/v1/irrigation
+        |
+        v
+Validar userId, devEUI e timezone
+        |
+        v
+Consultar API de sensores
+        |
+        v
+Validar, filtrar e ordenar leituras
+        |
+        +--> Kalman escalar: série histórica filtrada
+        |
+        +--> Kalman nível + tendência: projeção futura
+        |
+        +--> Diagnósticos: tendência, incerteza e limites persistentes
+        |
+        v
+Consultar coordenadas do dispositivo no Supabase
+        |
+        v
+Consultar seis dias de previsão na Open-Meteo
+        |
+        +--> Resumo meteorológico
+        +--> Classificação do solo e recomendação
+        |
+        v
+JSON com dados, projeção, diagnósticos e decisão
 ```
 
-## 2. Requisitos
+## 3. Requisitos
 
 - Go 1.22 ou superior.
-- Acesso à API que disponibiliza os dados dos sensores.
-- Projeto Supabase com uma tabela contendo os dispositivos e suas coordenadas.
-- Conexão com a internet para consultar a Open-Meteo.
+- API de sensores acessível pelo servidor Go.
+- Projeto Supabase com registro do usuário e coluna JSON de dispositivos/coordenadas.
+- Acesso à internet para consultar a Open-Meteo.
 
-## 3. Configuração e execução
+O serviço usa somente a biblioteca padrão do Go, portanto não há dependências externas no `go.mod`.
 
-### 3.1. Variáveis de ambiente
+## 4. Configuração
 
-Copie o arquivo de exemplo e configure os valores necessários:
+Copie o arquivo de exemplo e preencha os valores do ambiente:
 
 ```bash
 cp .env.example .env
 ```
 
-Edite o arquivo `.env`:
-
-```dotenv
-PORT=8456
-
-SENSOR_API_URL_TEMPLATE=http://localhost:3000/api/sensors/{user}/{devEUI}
-
-SUPABASE_URL=https://SEU_PROJETO.supabase.co
-SUPABASE_KEY=SUA_CHAVE_SUPABASE
-
-SUPABASE_TABLE=profiles
-SUPABASE_USER_COLUMN=id
-SUPABASE_DEVICES_COLUMN=devices
-
-SOIL_DRY_THRESHOLD=30
-SOIL_WET_THRESHOLD=70
-
-RAIN_PROBABILITY_THRESHOLD=60
-MIN_RAIN_MM=3
-
-KALMAN_PROCESS_NOISE=1
-KALMAN_MEASUREMENT_NOISE=4
-
-IRRIGATION_TIMEZONE=America/Sao_Paulo
-```
-
-O endereço da API de sensores acima é apenas um exemplo. Substitua-o pela URL real do serviço utilizado.
-
-As variáveis têm as seguintes funções:
-
-| Variável | Descrição |
-|---|---|
-| `PORT` | Porta HTTP do microsserviço. Padrão: `8456`. |
-| `SENSOR_API_URL_TEMPLATE` | URL da API de sensores, contendo `{user}` e `{devEUI}`. |
-| `SUPABASE_URL` | URL do projeto Supabase. |
-| `SUPABASE_KEY` | Chave utilizada para acessar a API do Supabase. |
-| `SUPABASE_TABLE` | Tabela que contém as coordenadas dos dispositivos. Padrão: `profiles`. |
-| `SUPABASE_USER_COLUMN` | Coluna utilizada para identificar o usuário. Padrão: `id`. |
-| `SUPABASE_DEVICES_COLUMN` | Coluna JSON que contém os dispositivos. Padrão: `devices`. |
-| `SOIL_DRY_THRESHOLD` | Limite máximo para classificar o solo como seco. |
-| `SOIL_WET_THRESHOLD` | Limite mínimo para classificar o solo como úmido. |
-| `RAIN_PROBABILITY_THRESHOLD` | Limite percentual utilizado na interpretação da previsão de chuva. |
-| `MIN_RAIN_MM` | Volume mínimo de chuva considerado relevante na regra de recomendação. |
-| `KALMAN_PROCESS_NOISE` | Parâmetro de ruído do processo do filtro de Kalman. |
-| `KALMAN_MEASUREMENT_NOISE` | Parâmetro de ruído da medição do filtro de Kalman. |
-| `IRRIGATION_TIMEZONE` | Fuso horário padrão utilizado para interpretar os dias da previsão. |
-
-Os valores numéricos apresentados são configurações iniciais para testes, não parâmetros universais para todas as culturas e tipos de solo.
-
-### 3.2. Iniciar o serviço
+Configure as variáveis na sessão de terminal antes de iniciar o serviço:
 
 ```bash
 set -a
 source .env
 set +a
-
 go test ./...
+go vet ./...
 go run .
 ```
 
-O serviço ficará disponível, por padrão, em `http://localhost:8456`.
+O serviço escuta na porta `8456` por padrão.
 
-### 3.3. Verificar a disponibilidade
+### 4.1. Variáveis de ambiente
 
-**Endpoint:** `GET /healthz`
+| Variável | Padrão | Descrição |
+|---|---:|---|
+| `PORT` | `8456` | Porta HTTP do microsserviço. |
+| `SENSOR_API_URL_TEMPLATE` | — | Template da URL da API de sensores. Deve conter `{user}` e `{devEUI}`. |
+| `SENSOR_API_TOKEN` | vazio | Token Bearer opcional enviado à API de sensores. |
+| `SUPABASE_URL` | — | URL do projeto Supabase. |
+| `SUPABASE_KEY` | — | Chave usada pelo servidor para consultar o Supabase. Mantenha-a fora do frontend. |
+| `SUPABASE_TABLE` | `profiles` | Tabela que contém os dispositivos. |
+| `SUPABASE_USER_COLUMN` | `id` | Coluna usada para identificar o usuário. |
+| `SUPABASE_DEVICES_COLUMN` | `devices` | Coluna JSON que contém os dispositivos e coordenadas. |
+| `SOIL_DRY_THRESHOLD` | `30` | Valor igual ou abaixo do qual o solo é classificado como seco. |
+| `SOIL_WET_THRESHOLD` | `70` | Valor igual ou acima do qual o solo é classificado como úmido. |
+| `RAIN_PROBABILITY_THRESHOLD` | `60` | Probabilidade diária a partir da qual `rain_likely` é verdadeiro. |
+| `MIN_RAIN_MM` | `3` | Volume mínimo de chuva que participa da regra de cautela. |
+| `KALMAN_PROCESS_NOISE` | `1` | Ruído do processo do filtro escalar. |
+| `KALMAN_MEASUREMENT_NOISE` | `4` | Ruído de medição do filtro escalar. |
+| `IRRIGATION_TIMEZONE` | `America/Sao_Paulo` | Fuso padrão; pode ser sobrescrito pela query string. |
+| `SOIL_PREDICTION_HORIZON_HOURS` | `24` | Horizonte da projeção de umidade, de 1 a 168 horas. |
+| `SOIL_PREDICTION_STEP_MINUTES` | `60` | Intervalo entre pontos da projeção, de 5 a 1440 minutos. O serviço limita a 500 pontos. |
+| `SOIL_PREDICTION_PROCESS_NOISE` | `0.05` | Parâmetro de ruído de processo do modelo preditivo de nível + tendência. |
+| `SOIL_MOISTURE_MIN_VALUE` | `0` | Limite inferior da escala usada para limitar a projeção e seus intervalos. |
+| `SOIL_MOISTURE_MAX_VALUE` | `100` | Limite superior da escala usada para limitar a projeção e seus intervalos. |
+| `SOIL_TREND_STABLE_THRESHOLD` | `0.1` | Módulo mínimo da tendência, em unidades do sensor por hora, para classificar alta ou queda. |
+| `SOIL_PREDICTION_HIGH_UNCERTAINTY_WIDTH` | `30` | Largura do intervalo de projeção a partir da qual a incerteza é classificada como alta. |
+| `SOIL_DIAGNOSTIC_CONSECUTIVE_SAMPLES` | `5` | Quantidade mínima de leituras válidas consecutivas para acionar diagnóstico de limite. Deve ser pelo menos 2. |
+| `SOIL_ZERO_TOLERANCE` | `0.5` | Distância acima do limite inferior considerada próxima de zero. |
+| `SOIL_SATURATION_MARGIN` | `1` | Distância abaixo do limite superior considerada próxima de saturação. |
+| `TEMP_FIX_SENSOR_TIMESTAMP` | `false` | Ajuste temporário de timestamps para testes. **Não ativar em produção.** |
 
-```bash
-curl -sS http://localhost:8456/healthz
-```
+Os parâmetros relacionados à escala devem corresponder à escala real emitida pelo sensor. Os números padrão são valores iniciais, não limites agronômicos universais. As variâncias/ruídos do filtro precisam ser calibrados empiricamente.
 
-Resposta esperada:
+### 4.2. API de sensores
 
-```json
-{
-  "status": "ok"
-}
-```
-
-Esse endpoint verifica se o serviço HTTP está respondendo. Ele não garante que a API de sensores, o Supabase ou a Open-Meteo estejam disponíveis.
-
----
-
-## 4. Utilização da API de irrigação
-
-### 4.1. Endpoint principal
-
-**Método:** `GET`
-
-**Rota:** `/api/v1/irrigation`
-
-**Parâmetros de consulta:**
-
-| Parâmetro | Obrigatório | Descrição |
-|---|---|---|
-| `userId` | Sim | Identificador do usuário associado ao sensor. |
-| `devEUI` | Sim | Identificador único do dispositivo. |
-| `timezone` | Não | Fuso horário utilizado no processamento das datas. Padrão: `America/Sao_Paulo`. |
-
-### 4.2. Exemplo de requisição
-
-```bash
-curl -sS -G "http://localhost:8456/api/v1/irrigation" \
-  --data-urlencode "userId=ID_DO_USUARIO" \
-  --data-urlencode "devEUI=5e76ce4fd99eefe3" \
-  --data-urlencode "timezone=America/Sao_Paulo"
-```
-
-Também é possível acessar a URL diretamente pelo navegador:
-
-```text
-http://localhost:8456/api/v1/irrigation?userId=ID_DO_USUARIO&devEUI=5e76ce4fd99eefe3&timezone=America%2FSao_Paulo
-```
-
-O parâmetro `userId` deve corresponder ao identificador armazenado na coluna configurada em `SUPABASE_USER_COLUMN`. O serviço utiliza esse identificador para localizar o registro do usuário e, posteriormente, encontrar o dispositivo solicitado.
-
-### 4.3. Formato esperado pela API de sensores
-
-O microsserviço aceita uma resposta contendo um único sensor ou uma lista de sensores. Cada registro deve ser compatível com a seguinte estrutura:
+O serviço aceita uma resposta com um registro ou com uma lista de registros. Exemplo:
 
 ```json
 {
@@ -204,17 +132,15 @@ O microsserviço aceita uma resposta contendo um único sensor ou uma lista de s
 }
 ```
 
-O timestamp deve representar o horário Unix em segundos. O campo `soil_moisture` deve ser numérico e estar presente para que a leitura seja utilizada. O campo `validity` deve ser `true`.
+O `timestamp` deve ser Unix time em segundos. A leitura precisa ter `validity: true`, umidade numérica e timestamp positivo; leituras mais de cinco minutos no futuro ou mais antigas que 24 horas são descartadas. Se o campo `devEUI` vier preenchido, deve corresponder ao dispositivo solicitado. Leituras aceitas são ordenadas cronologicamente.
 
-Por padrão, o microsserviço considera leituras com timestamp válido, que não estejam mais de cinco minutos no futuro e cuja idade não ultrapasse 24 horas. Leituras que não atendam aos critérios são descartadas.
+`TEMP_FIX_SENSOR_TIMESTAMP=true` desloca timestamps recebidos, preservando seus intervalos, para facilitar testes com dados antigos. Isso altera a referência temporal artificialmente e não deve ser usado em produção.
 
-Quando a API retorna várias leituras válidas, elas são ordenadas cronologicamente e utilizadas para calcular a estimativa filtrada da umidade do solo.
+### 4.3. Localização no Supabase
 
-### 4.4. Localização do dispositivo no Supabase
+A tabela e as colunas são configuradas pelas variáveis `SUPABASE_TABLE`, `SUPABASE_USER_COLUMN` e `SUPABASE_DEVICES_COLUMN`. A coluna `devices` pode ser um objeto indexado ou um array. Cada dispositivo deve conter `devEUI` e coordenadas com `lat`/`lon` ou `latitude`/`longitude`.
 
-O microsserviço não recebe latitude e longitude na requisição HTTP. As coordenadas são obtidas da coluna JSON definida por `SUPABASE_DEVICES_COLUMN`.
-
-Exemplo de estrutura da coluna `devices`:
+Exemplo:
 
 ```json
 {
@@ -226,344 +152,298 @@ Exemplo de estrutura da coluna `devices`:
 }
 ```
 
-Também são aceitos os campos `latitude` e `longitude` em substituição a `lat` e `lon`.
+## 5. Endpoints
 
-O serviço procura o dispositivo pelo `devEUI` informado. Caso não encontre o usuário, o dispositivo ou coordenadas válidas, o processamento é interrompido e um erro é retornado.
+### `GET /healthz`
 
----
+Verifica se o servidor HTTP está ativo. Não valida a disponibilidade das APIs externas.
 
-## 5. Interpretação da resposta JSON
+```bash
+curl -i http://localhost:8456/healthz
+```
 
-A resposta de sucesso contém cinco componentes principais: identificação do sensor, localização, dados processados do sensor, previsão meteorológica e recomendação de irrigação.
+Resposta esperada:
 
-### 5.1. Exemplo ilustrativo
+```json
+{"status":"ok"}
+```
 
-Os valores abaixo são fictícios e servem apenas para demonstrar a estrutura da resposta.
+### `GET /api/v1/irrigation`
+
+Parâmetros:
+
+| Parâmetro | Obrigatório | Descrição |
+|---|---|---|
+| `userId` | Sim | Identificador do usuário correspondente à coluna configurada em `SUPABASE_USER_COLUMN`. |
+| `devEUI` | Sim | Identificador do dispositivo. |
+| `timezone` | Não | Fuso IANA para datas da previsão; padrão `America/Sao_Paulo`. |
+
+Exemplo:
+
+```bash
+curl -sS -G "http://localhost:8456/api/v1/irrigation" \
+  --data-urlencode "userId=ID_DO_USUARIO" \
+  --data-urlencode "devEUI=5e76ce4fd99eefe3" \
+  --data-urlencode "timezone=America/Sao_Paulo"
+```
+
+O endpoint deve ser autenticado e autorizado antes de ser exposto em produção. Não confie apenas no `userId` informado pelo cliente.
+
+## 6. Contrato da resposta JSON
+
+A resposta HTTP `200` inclui os campos abaixo. Os campos legados `sensor`, `forecast_today_and_next_5_days`, `irrigation` e `note` continuam presentes; foram acrescentados históricos, projeção, diagnósticos e resumo meteorológico.
+
+| Campo | Conteúdo |
+|---|---|
+| `sensor_id` | `devEUI` consultado. |
+| `location` | Latitude, longitude, timezone e fonte da localização. |
+| `sensor` | Última leitura bruta, valor filtrado atual, temperatura, umidade do ar, timestamp e validade. |
+| `sensor_history` | Leituras válidas da janela recente, com valores brutos e filtrados calculados no Go. |
+| `soil_moisture_prediction` | Modelo, nível atual, tendência, projeção, intervalo de incerteza e diagnósticos calculados no Go. |
+| `forecast_today_and_next_5_days` | Até seis dias de probabilidade de chuva, precipitação e ET₀. |
+| `forecast_summary` | Agregados meteorológicos calculados no Go. |
+| `irrigation` | Classificação do solo, ação, recomendação, sinalização de validação manual e mensagem. |
+| `note` | Limitações importantes do modelo. |
+
+### 6.1. Exemplo da estrutura dos novos campos
+
+Este é um exemplo estrutural, com valores ilustrativos:
 
 ```json
 {
   "sensor_id": "5e76ce4fd99eefe3",
-  "location": {
-    "latitude": -23.647134,
-    "longitude": -46.574190,
-    "timezone": "America/Sao_Paulo",
-    "source": "Supabase"
-  },
   "sensor": {
-    "timestamp": "2026-10-21T15:00:00Z",
-    "soil_moisture_raw": 28.0,
-    "soil_moisture_kalman_filtered": 29.4,
-    "air_humidity_percent": 60.0,
-    "air_temperature_celsius": 25.5,
+    "timestamp": "2026-10-22T16:35:58Z",
+    "soil_moisture_raw": 42.1,
+    "soil_moisture_kalman_filtered": 41.6,
+    "air_humidity_percent": 65.0,
+    "air_temperature_celsius": 24.2,
     "validity": true
+  },
+  "sensor_history": [
+    {
+      "timestamp": "2026-10-22T16:30:00Z",
+      "soil_moisture_raw": 43.0,
+      "soil_moisture_kalman_filtered": 42.4
+    }
+  ],
+  "soil_moisture_prediction": {
+    "model": "kalman_level_trend",
+    "unit": "sensor_scale",
+    "base_timestamp": "2026-10-22T16:35:58Z",
+    "horizon_hours": 24,
+    "step_minutes": 60,
+    "current_filtered": 41.6,
+    "trend_per_hour": -0.2,
+    "trend_status": "decreasing",
+    "predicted_at_horizon": 36.8,
+    "change_from_current": -4.8,
+    "prediction_interval_width": 28.4,
+    "confidence_status": "within_threshold",
+    "diagnostics": {
+      "persistent_zero": false,
+      "sensor_saturated": false,
+      "consecutive_near_zero": 0,
+      "consecutive_near_maximum": 0,
+      "required_consecutive_samples": 5,
+      "messages": [
+        "Nenhuma condição de diagnóstico foi acionada pelos limites configurados."
+      ]
+    },
+    "points": [
+      {
+        "timestamp": "2026-10-22T16:35:58Z",
+        "hours_ahead": 0,
+        "soil_moisture_predicted": 41.6,
+        "lower_bound": 40.0,
+        "upper_bound": 43.2
+      }
+    ]
   },
   "forecast_today_and_next_5_days": [
     {
-      "date": "2026-10-21",
-      "precipitation_probability_percent": 20,
-      "precipitation_mm": 0.5,
-      "et0_mm": 4.2,
+      "date": "2026-10-22",
+      "precipitation_probability_percent": 35,
+      "precipitation_mm": 1.2,
+      "et0_mm": 3.2,
       "rain_likely": false
     }
   ],
-  "irrigation": {
-    "soil_status": "dry",
-    "action": "irrigate_on_recommended_day",
-    "should_irrigate": true,
-    "should_irrigate_today": true,
-    "recommended_day": "2026-10-21",
-    "rain_probability_percent": 20,
-    "expected_rain_mm": 0.5,
-    "message": "Exemplo de mensagem explicativa."
+  "forecast_summary": {
+    "days": 1,
+    "total_precipitation_mm": 1.2,
+    "max_precipitation_probability_percent": 35,
+    "days_with_likely_rain": 0,
+    "et0_available": true,
+    "total_et0_mm": 3.2
   },
-  "note": "Observações sobre a filtragem e as limitações da recomendação."
+  "irrigation": {
+    "soil_status": "intermediate",
+    "action": "manual_check",
+    "should_irrigate": null,
+    "should_irrigate_today": null,
+    "recommended_day": null,
+    "requires_manual_validation": true,
+    "message": "A leitura está entre os limiares; calibre o sensor e verifique a cultura antes de decidir."
+  },
+  "note": "A projeção é estatística e exige validação de campo."
 }
 ```
 
-O exemplo apresenta apenas um elemento da previsão para facilitar a leitura. Na resposta real, o campo `forecast_today_and_next_5_days` contém até seis dias, incluindo hoje e os cinco dias seguintes.
+Os exemplos acima mostram a forma dos objetos e **não representam a saída de uma consulta real**. Na resposta real, as listas incluem todos os pontos que o processamento aceitou ou gerou.
 
-**Observação:** os resultados são ilustrativos; o texto de `message` e os demais campos são determinados pelo processamento efetivo do serviço.
+### 6.2. `sensor_history`
 
-### 5.2. Campos de identificação e localização
+Cada ponto tem:
+
+- `timestamp`: horário UTC da medição;
+- `soil_moisture_raw`: medição recebida da API de sensores;
+- `soil_moisture_kalman_filtered`: estimativa filtrada pelo MSS.
+
+O array contém leituras que passaram pela validação e pela janela de idade configurada no serviço (24 horas na versão atual). Não é o histórico de sete dias do cliente.
+
+### 6.3. `soil_moisture_prediction`
 
 | Campo | Interpretação |
 |---|---|
-| `sensor_id` | Identificador do sensor consultado. |
-| `location.latitude` | Latitude associada ao dispositivo. |
-| `location.longitude` | Longitude associada ao dispositivo. |
-| `location.timezone` | Fuso horário utilizado para a interpretação das datas. |
-| `location.source` | Origem dos dados de localização. |
+| `model` | Identificador do modelo preditivo (`kalman_level_trend`). |
+| `unit` | `sensor_scale`: escala numérica do sensor, não necessariamente porcentagem volumétrica do solo. |
+| `base_timestamp` | Data/hora usada como origem da projeção. |
+| `horizon_hours` | Horizonte previsto. |
+| `step_minutes` | Intervalo entre pontos. |
+| `current_filtered` | Valor de referência filtrado no início da projeção. |
+| `trend_per_hour` | Tendência estimada por hora, na escala do sensor. |
+| `trend_status` | `increasing`, `decreasing` ou `stable`, conforme `SOIL_TREND_STABLE_THRESHOLD`. |
+| `predicted_at_horizon` | Estimativa central no último ponto do horizonte. |
+| `change_from_current` | Diferença calculada no Go entre o valor projetado no horizonte e o atual filtrado. |
+| `prediction_interval_width` | Largura do intervalo no final do horizonte (`upper_bound - lower_bound`). |
+| `confidence_status` | `high_uncertainty`, `within_threshold` ou `unavailable`. |
+| `diagnostics` | Diagnósticos de leituras próximas aos limites físicos configurados e mensagens calculadas pelo Go. |
+| `points` | Pontos futuros contendo timestamp, horas à frente, valor previsto e limites. |
 
-### 5.3. Campos do sensor
+A estimativa futura é estatística, baseada na tendência recente das medições. O modelo atual não incorpora chuva futura, ET₀, água aplicada, drenagem, tipo de solo ou espécie cultivada. A faixa é uma aproximação derivada das covariâncias do modelo; não é uma garantia probabilística calibrada em campo.
+
+### 6.4. Diagnósticos do solo
+
+`soil_moisture_prediction.diagnostics` contém:
+
+- `persistent_zero`: as últimas N leituras válidas ficaram dentro da tolerância configurada próxima ao limite inferior;
+- `sensor_saturated`: as últimas N leituras válidas ficaram dentro da margem configurada próxima ao limite superior;
+- `consecutive_near_zero`: quantidade de amostras consecutivas recentes próximas ao limite inferior;
+- `consecutive_near_maximum`: quantidade de amostras consecutivas recentes próximas ao limite superior;
+- `required_consecutive_samples`: N mínimo configurado;
+- `messages`: mensagens explicativas geradas no backend.
+
+Os diagnósticos se baseiam nas **medições brutas recentes**, não no valor filtrado. Uma sequência no limite pode representar uma condição física real ou uma leitura presa por escala, calibração ou instalação. O diagnóstico, isoladamente, não prova defeito.
+
+### 6.5. `confidence_status`
+
+O serviço mede a largura do intervalo no último ponto da projeção. Se ela for maior ou igual a `SOIL_PREDICTION_HIGH_UNCERTAINTY_WIDTH`, retorna `high_uncertainty`; caso contrário, `within_threshold`. Se não houver pontos projetados, retorna `unavailable`.
+
+Esse campo é um critério operacional configurável de largura de intervalo, não uma probabilidade estatística de acerto.
+
+### 6.6. `forecast_summary`
 
 | Campo | Interpretação |
 |---|---|
-| `sensor.timestamp` | Timestamp da leitura selecionada, convertido para uma data em UTC. |
-| `sensor.soil_moisture_raw` | Valor original da umidade do solo recebido da API. |
-| `sensor.soil_moisture_kalman_filtered` | Estimativa da umidade do solo após a aplicação do filtro de Kalman. |
-| `sensor.air_humidity_percent` | Umidade relativa do ar fornecida pelo sensor. |
-| `sensor.air_temperature_celsius` | Temperatura do ar fornecida pelo sensor, em graus Celsius. |
-| `sensor.validity` | Indicador de validade da leitura selecionada. |
+| `days` | Quantidade de dias no resumo. |
+| `total_precipitation_mm` | Soma da precipitação prevista na janela retornada. |
+| `max_precipitation_probability_percent` | Maior probabilidade diária na janela. |
+| `days_with_likely_rain` | Número de dias que atingem `RAIN_PROBABILITY_THRESHOLD`. |
+| `et0_available` | Indica se a API disponibilizou ET₀ para todos os dias do resumo. |
+| `total_et0_mm` | Soma diária de ET₀ quando o dado está disponível; omitido quando indisponível. |
 
-A umidade bruta e a filtrada não representam necessariamente o mesmo valor. A filtrada procura reduzir oscilações entre medições consecutivas, mas não substitui a calibração do sensor nem garante que o valor estimado corresponda à umidade volumétrica real do solo.
+Probabilidade de chuva, volume previsto e ET₀ são variáveis diferentes. A ET₀ não participa diretamente da pontuação de escolha do dia na implementação atual.
 
-### 5.4. Campos da previsão meteorológica
+### 6.7. `irrigation`
 
-| Campo | Interpretação |
+Os valores de `soil_status` são:
+
+- `dry`: valor filtrado menor ou igual a `SOIL_DRY_THRESHOLD`;
+- `intermediate`: valor entre os limites;
+- `wet`: valor filtrado maior ou igual a `SOIL_WET_THRESHOLD`.
+
+Quando o solo está seco e não há diagnóstico persistente de limite, a API escolhe o dia com a menor pontuação:
+
+```text
+score = probabilidade_de_chuva + min(3 * precipitação_mm, 30)
+```
+
+Se a probabilidade e o volume atingirem seus limites de cautela, a ação será `irrigate_with_caution`; caso contrário, será `irrigate_on_recommended_day`.
+
+**Regra conservadora para leituras persistentes no limite:** se `persistent_zero` ou `sensor_saturated` for verdadeiro, a API retorna `action: "manual_check_sensor"`, `requires_manual_validation: true` e campos de decisão automática como `should_irrigate`, `should_irrigate_today` e `recommended_day` como `null`. Isso evita transformar uma sequência potencialmente anômala em uma recomendação automática. A classificação `soil_status` permanece disponível como descrição numérica da leitura.
+
+Na faixa intermediária, a API retorna `action: "manual_check"` e `requires_manual_validation: true`. Quando o solo está úmido, retorna `not_needed_now`, sem data recomendada.
+
+Essas regras não acionam irrigação automaticamente e não substituem validação agronômica.
+
+## 7. Filtros e projeção
+
+### 7.1. Kalman escalar para histórico
+
+O filtro escalar reduz oscilações de leituras sucessivas. Para cada medição `z`, ele calcula a covariância predita, o ganho de Kalman e atualiza a estimativa. Os parâmetros `KALMAN_PROCESS_NOISE` e `KALMAN_MEASUREMENT_NOISE` precisam refletir a variabilidade e a escala real do sensor.
+
+Esse filtro produz a série `soil_moisture_kalman_filtered` em `sensor_history` e o valor atual usado na classificação de `soil_status`.
+
+### 7.2. Kalman de nível + tendência
+
+Um modelo de dois estados estima simultaneamente:
+
+- nível de umidade;
+- inclinação temporal em unidades do sensor por hora.
+
+Os intervalos entre leituras são calculados a partir dos timestamps reais, em horas. O estado e a covariância são atualizados em cada nova medição. A projeção usa o último valor filtrado como origem e a tendência estimada para gerar os pontos futuros. As estimativas e os limites são limitados a `SOIL_MOISTURE_MIN_VALUE` e `SOIL_MOISTURE_MAX_VALUE`.
+
+`trend_status` é baseado em `trend_per_hour`:
+
+- `increasing`: tendência maior que o limiar positivo;
+- `decreasing`: tendência menor que o limiar negativo;
+- `stable`: tendência dentro do limiar.
+
+O modelo não deve inventar uma mudança quando as medições não mostram tendência. Por exemplo, se todas as últimas medições forem zero, a projeção central pode continuar em zero, enquanto a incerteza aumenta. Isso é um alerta para revisar a escala e a instalação do sensor, não evidência de que o solo continuará exatamente nesse valor.
+
+## 8. Testes
+
+Execute:
+
+```bash
+go test ./...
+go vet ./...
+```
+
+A suíte cobre a classificação da tendência, detecção de sequências persistentes próximas aos limites, comportamento conservador da recomendação, resumo meteorológico, limites da projeção e classificação de incerteza.
+
+## 9. Erros HTTP
+
+| Código | Significado |
 |---|---|
-| `date` | Data local do dia previsto, no fuso horário solicitado. |
-| `precipitation_probability_percent` | Probabilidade máxima diária de precipitação fornecida pela Open-Meteo, em porcentagem. |
-| `precipitation_mm` | Volume total de precipitação previsto para o dia, em milímetros. |
-| `et0_mm` | Evapotranspiração de referência estimada para o dia, em milímetros, quando disponível. |
-| `rain_likely` | Indica se a probabilidade diária atingiu ou ultrapassou `RAIN_PROBABILITY_THRESHOLD`. |
-
-A probabilidade de precipitação e o volume previsto são grandezas diferentes. Uma probabilidade elevada não significa necessariamente que haverá um grande volume de chuva, assim como um volume previsto pode ser relevante mesmo com uma probabilidade inferior ao limite configurado.
-
-A ET₀ representa uma estimativa da demanda evaporativa de referência da atmosfera. Ela não equivale diretamente à necessidade hídrica de uma cultura específica.
-
----
-
-## 6. Como o algoritmo calcula a recomendação
-
-O algoritmo foi desenvolvido em etapas independentes, permitindo separar o tratamento dos dados medidos, a interpretação das condições do solo e a análise da previsão meteorológica.
-
-### 6.1. Validação e ordenação das leituras
-
-Primeiro, o serviço obtém os registros da API de sensores e verifica os seguintes critérios:
-
-- O `devEUI`, quando presente, deve corresponder ao dispositivo solicitado.
-- O timestamp deve ser positivo e estar dentro da janela de tempo permitida.
-- A leitura deve estar marcada como válida.
-- A umidade do solo deve estar presente.
-
-Depois da validação, as leituras são ordenadas pelo timestamp em ordem crescente. Isso é necessário porque o filtro de Kalman processa uma sequência temporal, e não um conjunto de medições em ordem arbitrária.
-
-Se nenhuma leitura for aceita, a API retorna um erro, pois não há dados suficientes para calcular uma recomendação.
-
-### 6.2. Filtragem da umidade do solo pelo filtro de Kalman
-
-Sensores podem apresentar pequenas oscilações devido a ruídos eletrônicos, limitações de precisão, condições de instalação ou variações locais. Para reduzir o efeito dessas oscilações, o microsserviço aplica um filtro de Kalman unidimensional à sequência de umidade do solo.
-
-O algoritmo mantém duas grandezas internas:
-
-- \(x_k\): estimativa filtrada da umidade no instante \(k\).
-- \(P_k\): covariância estimada do erro da estimativa.
-
-A cada nova medição \(z_k\), o filtro executa uma etapa de predição e outra de correção.
-
-**Predição da covariância:**
-
-\[
-P_k^- = P_{k-1} + Q
-\]
-
-**Ganho de Kalman:**
-
-\[
-K_k = \frac{P_k^-}{P_k^- + R}
-\]
-
-**Atualização da estimativa:**
-
-\[
-x_k = x_{k-1} + K_k(z_k-x_{k-1})
-\]
-
-**Atualização da covariância:**
-
-\[
-P_k = (1-K_k)P_k^-
-\]
-
-Em que:
-
-- \(z_k\) é a medição bruta da umidade do solo;
-- \(Q\) é o parâmetro de ruído do processo;
-- \(R\) é o parâmetro de ruído da medição;
-- \(K_k\) determina o peso atribuído à nova medição em relação à estimativa anterior.
-
-Na implementação atual, a primeira estimativa é inicializada com a primeira medição válida, e a covariância inicial é definida por \(R\).
-
-O filtro é aplicado à sequência de leituras de umidade do solo, não às variáveis meteorológicas. A estimativa final da sequência é utilizada na classificação do estado do solo.
-
-**Efeito dos parâmetros:** valores maiores de \(R\), mantendo \(Q\) constante, tendem a aumentar a suavização das medições. Valores maiores de \(Q\), mantendo \(R\) constante, permitem que a estimativa se adapte mais rapidamente às mudanças observadas.
-
-Os parâmetros devem ser calibrados com dados reais. Como as medições são utilizadas na escala numérica original do sensor, \(Q\) e \(R\) devem ser interpretados em relação à escala e às unidades dessas medições.
-
-### 6.3. Classificação da condição do solo
-
-Após a filtragem, o algoritmo compara a estimativa final com dois limites configuráveis:
-
-- `SOIL_DRY_THRESHOLD`: limite de classificação como solo seco.
-- `SOIL_WET_THRESHOLD`: limite de classificação como solo úmido.
-
-A classificação é definida pelas seguintes regras:
-
-| Condição | Regra | `soil_status` | Interpretação |
-|---|---|---|---|
-| Solo seco | \(x \leq D\) | `dry` | A umidade está abaixo ou no limite seco. |
-| Faixa intermediária | \(D < x < W\) | `intermediate` | A leitura não é suficiente para uma decisão automática. |
-| Solo úmido | \(x \geq W\) | `wet` | A umidade está acima ou no limite úmido. |
-
-Em que \(x\) é a estimativa filtrada, \(D\) é o limite seco e \(W\) é o limite úmido.
-
-Com os parâmetros padrão, \(D=30\) e \(W=70\). Esses números são exemplos e só fazem sentido quando compatíveis com a escala efetivamente utilizada pelo sensor.
-
-O comportamento de cada classe é:
-
-- **`dry`:** o algoritmo avalia a previsão meteorológica para selecionar um dia recomendado.
-- **`intermediate`:** o algoritmo recomenda uma verificação manual, pois não há evidência suficiente para classificar o solo como seco ou úmido.
-- **`wet`:** o algoritmo recomenda não irrigar naquele momento.
-
-### 6.4. Consulta e análise da previsão meteorológica
-
-O serviço consulta a Open-Meteo utilizando as coordenadas geográficas do sensor e o fuso horário configurado. A previsão solicitada abrange seis dias: o dia atual e os cinco seguintes.
-
-Para cada dia, são utilizados:
-
-- Probabilidade máxima diária de precipitação.
-- Volume diário de precipitação previsto, em milímetros.
-- ET₀ diária, quando disponibilizada pela resposta.
-
-O algoritmo não calcula uma nova probabilidade de chuva a partir das leituras do sensor. Ele utiliza a previsão meteorológica fornecida pela Open-Meteo.
-
-Essa separação é importante porque a umidade do solo e a probabilidade de precipitação são variáveis distintas. Além disso, as probabilidades referentes a dias diferentes descrevem eventos meteorológicos diferentes; filtrá-las como se fossem medições sucessivas da mesma variável não seria adequado sem um modelo temporal específico.
-
-### 6.5. Seleção do dia recomendado para irrigação
-
-Quando o solo é classificado como seco, o algoritmo atribui uma pontuação a cada um dos seis dias previstos. A pontuação combina a probabilidade de chuva com o volume de precipitação esperado.
-
-A expressão utilizada é:
-
-\[
-S_i = P_i + \min(3R_i,30)
-\]
-
-Em que:
-
-- \(S_i\) é a pontuação do dia \(i\);
-- \(P_i\) é a probabilidade máxima diária de precipitação, em pontos percentuais;
-- \(R_i\) é o volume previsto de precipitação, em milímetros;
-- \(\min(3R_i,30)\) limita a contribuição do volume de chuva a 30 pontos.
-
-O volume previsto recebe um peso de três pontos por milímetro, até atingir o limite de 30 pontos. Portanto, o componente de probabilidade pode contribuir com até 100 pontos, enquanto o componente de volume contribui com até 30.
-
-O dia recomendado é aquele que apresenta a menor pontuação:
-
-\[
-i^* = \underset{i}{\arg\min}\; S_i
-\]
-
-Esse critério favorece dias com menor risco combinado de precipitação, conforme os pesos definidos na implementação. Ele é uma heurística de decisão, e não uma previsão probabilística desenvolvida especificamente para a necessidade hídrica da cultura.
-
-Se dois dias apresentarem a mesma pontuação mínima, a implementação atual seleciona o primeiro deles na ordem cronológica.
-
-### 6.6. Interpretação final da recomendação
-
-Após a seleção do dia, o microsserviço compara a previsão com dois parâmetros adicionais:
-
-- `RAIN_PROBABILITY_THRESHOLD`: limite para considerar elevada a probabilidade de chuva.
-- `MIN_RAIN_MM`: volume mínimo para considerar a precipitação relevante.
-
-Se a probabilidade prevista for maior ou igual ao limite e o volume esperado também for maior ou igual ao mínimo, a resposta indica cautela na irrigação. Caso contrário, o algoritmo apresenta a recomendação de irrigar no dia selecionado.
-
-O campo `should_irrigate_today` indica se a data recomendada coincide com a data atual no fuso horário escolhido. Ele não significa, isoladamente, que a irrigação deva ser acionada sem validação.
-
-O campo `should_irrigate` representa a indicação geral derivada da classificação do solo. Quando o solo está seco, o algoritmo indica que a irrigação é necessária; quando está úmido, indica que não é necessária naquele momento. Na faixa intermediária, a decisão permanece indeterminada e requer verificação.
-
-O campo `action` identifica a ação sugerida pelo algoritmo, enquanto `message` apresenta uma explicação textual da recomendação.
-
----
-
-## 7. Parâmetros de calibração
-
-A qualidade das recomendações depende da calibração dos limiares e dos parâmetros do filtro.
-
-| Parâmetro | Efeito | Orientação |
-|---|---|---|
-| `SOIL_DRY_THRESHOLD` | Define quando o solo passa a ser classificado como seco. | Calibrar com medições e referências agronômicas. |
-| `SOIL_WET_THRESHOLD` | Define quando o solo passa a ser classificado como úmido. | Considerar a faixa adequada para a cultura e o tipo de solo. |
-| `RAIN_PROBABILITY_THRESHOLD` | Define o limite para classificar a probabilidade de chuva como elevada. | Ajustar à tolerância ao risco e às condições locais. |
-| `MIN_RAIN_MM` | Define o volume mínimo para tratar a chuva prevista como relevante. | Considerar a capacidade de infiltração e a necessidade hídrica. |
-| `KALMAN_PROCESS_NOISE` | Controla a adaptação da estimativa a mudanças na sequência. | Avaliar a resposta a variações reais da umidade. |
-| `KALMAN_MEASUREMENT_NOISE` | Controla o peso atribuído às novas medições. | Comparar as leituras brutas e filtradas. |
-
-Os valores de ruído do filtro correspondem a variâncias na escala da medição: se a umidade é representada em uma escala percentual, suas variâncias são expressas na escala percentual ao quadrado.
-
-Os limiares de umidade não devem ser considerados universais. Uma mesma leitura pode ter interpretações diferentes conforme o sensor, o substrato, o tipo de solo e a cultura cultivada.
-
-A ET₀ está presente na resposta para fornecer contexto sobre a demanda evaporativa, mas **não participa diretamente da pontuação utilizada para selecionar o dia recomendado na versão atual do algoritmo**.
-
----
-
-## 8. Tratamento de erros
-
-A API utiliza códigos HTTP para distinguir respostas bem-sucedidas de falhas durante o processamento.
-
-| Código HTTP | Significado |
-|---|---|
-| `200 OK` | Requisição processada e resultado retornado. |
-| `400 Bad Request` | Parâmetros obrigatórios ausentes ou fuso horário inválido. |
-| `502 Bad Gateway` | Falha na obtenção ou validação dos dados externos necessários ao processamento. |
-
-Exemplos de mensagens de erro:
+| `200 OK` | Processamento concluído. |
+| `400 Bad Request` | `userId` ou `devEUI` ausente, ou fuso horário inválido. |
+| `502 Bad Gateway` | Falha ao obter/validar dados da API de sensores, Supabase ou Open-Meteo. |
+
+Exemplo de erro:
 
 ```json
-{
-  "error": "informe userId e devEUI na query string"
-}
+{"error":"API não retornou leitura válida e recente para esse sensor"}
 ```
 
-```json
-{
-  "error": "API não retornou leitura válida e recente para esse sensor"
-}
-```
+Um `502` pode indicar indisponibilidade externa, dados ausentes ou ausência de leituras válidas; não significa necessariamente que o cálculo interno falhou.
 
-```json
-{
-  "error": "Supabase: falha ao consultar os dados do dispositivo"
-}
-```
+## 10. Segurança e implantação
 
-A última mensagem é ilustrativa; o texto real depende da falha retornada pelo serviço externo.
+- Nunca coloque `SUPABASE_KEY` ou `SENSOR_API_TOKEN` no aplicativo Expo ou no site.
+- Exija autenticação e autorização para o endpoint antes de publicação multiusuário.
+- Valide no servidor se o usuário autenticado pode consultar o `devEUI` enviado.
+- Configure HTTPS, logs e timeouts para o ambiente de produção.
+- Não habilite `TEMP_FIX_SENSOR_TIMESTAMP` em produção.
+- Não use a recomendação como acionamento automático sem validação agronômica e testes controlados.
 
-Um erro `502` não significa necessariamente que a lógica de recomendação está incorreta. Ele pode ocorrer por indisponibilidade de uma API externa, ausência de leituras válidas, falha de autenticação ou dados de localização inválidos.
+## 11. Limitações conhecidas
 
----
-
-## 9. Limitações e melhorias futuras
-
-A implementação atual utiliza uma regra de decisão relativamente simples, com o objetivo de manter o algoritmo compreensível e facilitar sua validação experimental.
-
-Entre as limitações atuais estão:
-
-- Os limiares de umidade precisam ser calibrados para o sensor e a cultura.
-- A filtragem de Kalman reduz oscilações, mas não corrige erros sistemáticos de calibração.
-- A previsão meteorológica está sujeita às incertezas do modelo e à resolução espacial dos dados.
-- A pontuação diária utiliza pesos fixos para probabilidade e volume de precipitação.
-- A ET₀ é retornada, mas ainda não participa do cálculo da pontuação nem de um balanço hídrico.
-- O algoritmo não calcula a lâmina de irrigação, o tempo de acionamento ou o volume de água necessário.
-- O serviço não comanda bombas, válvulas ou outros atuadores.
-
-Como evolução, podem ser incorporados modelos de balanço hídrico, parâmetros específicos por cultura e solo, calibração experimental dos pesos, análise histórica de precipitação e avaliação quantitativa da qualidade das recomendações.
-
-Antes de utilizar o sistema em operação real, é necessário comparar as recomendações com medições de campo e decisões agronômicas de referência.
-
-Também é importante manter as chaves do Supabase protegidas no servidor e implementar autenticação e autorização para o endpoint antes de disponibilizá-lo em um ambiente multiusuário.
-
----
-
-## 10. Texto técnico para artigo científico
-
-### Desenvolvimento de um microsserviço para apoio à decisão de irrigação
-
-Foi desenvolvido um microsserviço em linguagem Go para apoiar a tomada de decisão relacionada à irrigação, integrando dados de sensores de campo, informações geográficas e previsões meteorológicas. A solução foi estruturada como uma API HTTP, permitindo que outros componentes de uma arquitetura de monitoramento agrícola solicitem uma recomendação por meio da identificação do usuário e do dispositivo sensor.
-
-O processamento inicia-se pela obtenção e validação das leituras disponibilizadas pela API de sensores. São consideradas a validade declarada da medição, a presença do valor de umidade do solo e a consistência temporal do registro. Quando múltiplas leituras válidas estão disponíveis, elas são ordenadas cronologicamente e submetidas a um filtro de Kalman unidimensional, empregado para reduzir a influência de oscilações nas medições consecutivas. A estimativa resultante é então comparada com limiares configuráveis, possibilitando classificar a condição do solo como seca, intermediária ou úmida.
-
-Em paralelo, as coordenadas geográficas associadas ao dispositivo são recuperadas do banco de dados Supabase e utilizadas para consultar a previsão meteorológica da Open-Meteo. São obtidos dados diários de probabilidade máxima de precipitação, volume previsto de chuva e evapotranspiração de referência, quando disponível, para uma janela de seis dias. Quando a umidade filtrada caracteriza uma condição seca, o algoritmo calcula uma pontuação para cada dia da previsão, combinando a probabilidade de precipitação e o volume esperado de chuva. O dia de menor pontuação é selecionado como candidato à irrigação, sendo posteriormente avaliado por limites configuráveis de probabilidade e volume de precipitação para qualificar a recomendação.
-
-A arquitetura separa o tratamento das medições do sensor da interpretação dos dados meteorológicos. Essa separação evita que probabilidades referentes a dias distintos sejam tratadas como medições sucessivas de uma mesma variável, preservando a interpretação da previsão fornecida pelo serviço meteorológico. Além disso, a disponibilização dos resultados em formato JSON favorece a integração com interfaces de monitoramento e outros microsserviços.
-
-A solução constitui uma abordagem modular de apoio à decisão, na qual a filtragem das medições e a análise meteorológica são combinadas por regras explícitas e parâmetros ajustáveis. Entretanto, a recomendação obtida representa uma indicação computacional preliminar, e não uma determinação universal da necessidade hídrica da cultura. A avaliação de sua eficácia depende da calibração dos limiares, da qualidade dos sensores e da comparação dos resultados com observações e critérios agronômicos de referência. Como possibilidades de evolução, destacam-se a incorporação da evapotranspiração ao cálculo da demanda hídrica, o desenvolvimento de um balanço hídrico do solo e a validação experimental dos parâmetros de decisão em diferentes condições de cultivo.
+- Os limiares de solo e a escala do sensor precisam de calibração por equipamento, instalação, substrato e cultura.
+- Kalman reduz ruído, mas não corrige viés de calibração ou sensor defeituoso.
+- A projeção é estatística e ainda não calcula balanço hídrico.
+- A previsão da Open-Meteo tem incerteza e resolução espacial próprias.
+- ET₀ é informativa; ainda não entra na pontuação do dia recomendado.
+- O serviço não calcula lâmina, volume necessário ou duração de irrigação.
+- Os resultados devem ser comparados com observações e decisões de referência em campo.
