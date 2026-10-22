@@ -75,10 +75,10 @@ func wholeNumber(key string, fallback int) int {
 func config() (Config, error) {
 	c := Config{
 		FixSensorTimestamp: 
-		strings.EqualFold(
-			env("TEMP_FIX_SENSOR_TIMESTAMP", "false"),
-			"true",
-		),
+		// strings.EqualFold(
+			// env("TEMP_FIX_SENSOR_TIMESTAMP", "false"),
+			true,
+		// ),
 		Port:            env("PORT", "8456"),
 		SensorURL:       strings.TrimSpace(os.Getenv("SENSOR_API_URL_TEMPLATE")),
 		SensorToken:     os.Getenv("SENSOR_API_TOKEN"),
