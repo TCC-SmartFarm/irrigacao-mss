@@ -215,7 +215,7 @@ Os limites de `0` a `100` pressupõem uma escala compatível com essa faixa. Cas
 
 Esses parâmetros permitem sinalizar padrões que podem indicar um problema de medição, como leituras persistentemente nulas ou próximas da saturação da escala.
 
-> **Observação sobre timestamps:** na versão atual do código revisado, a correção temporária dos timestamps está definida diretamente como habilitada. Isso significa que os registros podem ter seus timestamps ajustados para que o registro mais recente coincida com o horário atual, preservando os intervalos entre as leituras. Essa lógica não deve ser considerada uma correção permanente dos dados do sensor. Antes de utilizar o serviço em produção, o comportamento deve ser corrigido para ser explicitamente configurável ou removido, de modo que os horários reais sejam preservados.
+> **Observação sobre timestamps:** o timestamp oficial de cada leitura é definido no `mqtt-sub`: usa-se o timestamp enviado pelo sensor quando ele está configurado (data a partir de 2025-01-01 e no máximo 5 min no futuro); caso contrário (sensor não configurado, que envia segundos desde o boot), usa-se o horário de recepção do uplink no ChirpStack. Por isso a correção temporária `TEMP_FIX_SENSOR_TIMESTAMP` fica **desligada** por padrão (`false`) e não deve ser usada em produção.
 
 ---
 

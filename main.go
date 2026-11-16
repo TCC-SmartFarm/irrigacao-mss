@@ -74,11 +74,10 @@ func wholeNumber(key string, fallback int) int {
 
 func config() (Config, error) {
 	c := Config{
-		FixSensorTimestamp: 
-		// strings.EqualFold(
-			// env("TEMP_FIX_SENSOR_TIMESTAMP", "false"),
-			true,
-		// ),
+		// DESLIGADO por padrão: o timestamp agora é corrigido na origem (mqtt-sub),
+		// então deslocar aqui fazia o /api/v1/irrigation mostrar horários diferentes
+		// do /api/sensors/latest para a MESMA leitura.
+		FixSensorTimestamp: strings.EqualFold(env("TEMP_FIX_SENSOR_TIMESTAMP", "false"), "true"),
 		Port:            env("PORT", "8456"),
 		SensorURL:       strings.TrimSpace(os.Getenv("SENSOR_API_URL_TEMPLATE")),
 		SensorToken:     os.Getenv("SENSOR_API_TOKEN"),
